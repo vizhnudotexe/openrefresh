@@ -5,47 +5,45 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:          # manual trigger from GitHub UI
+  workflow_dispatch:
+
+env:
+  ARCHIVE_PATH: ${{ github.workspace }}/build/AutoRefresh.xcarchive
+  IPA_DIR:      ${{ github.workspace }}/build/ipa
 
 jobs:
   build:
     name: Build & Export IPA
-    runs-on: macos-15         # Xcode 16 is pre-installed on macos-15 runners
+    runs-on: macos-15
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Select Xcode version ────────────────────────────────────────────
+      # ── 2. Select Xcode ──────────────────────────────────────────────────────
       - name: Select Xcode 16
-        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
-
-      # ── 3. Show available SDKs (debug) ─────────────────────────────────────
-      - name: Show SDK info
-        run: xcodebuild -showsdks
-
-      # ── 4. Resolve dependencies (none right now, future-proof) ────────────
-      - name: Resolve Swift packages
-        working-directory: AutoRefresh
         run: |
-          xcodebuild -resolvePackageDependencies \
-            -project AutoRefresh.xcodeproj \
-            -scheme AutoRefresh \
-            -destination "generic/platform=iOS"
+          sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+          xcodebuild -version
 
-      # ── 5. Build & Archive ─────────────────────────────────────────────────
-      # CODE_SIGN_IDENTITY="" + AD_HOC_CODE_SIGNING_ALLOWED=YES produces
-      # an unsigned archive that can be re-signed by SideStore/AltStore.
+      # ── 3. Install xcpretty ──────────────────────────────────────────────────
+      - name: Install xcpretty
+        run: gem install xcpretty --no-document
+
+      # ── 4. Archive ───────────────────────────────────────────────────────────
+      # pipefail ensures xcpretty pipe doesn't hide xcodebuild failures.
+      # Workspace path used for archive so all steps share the same location.
       - name: Archive
-        working-directory: AutoRefresh
         run: |
+          set -o pipefail
+          mkdir -p "${{ github.workspace }}/build"
           xcodebuild archive \
-            -project AutoRefresh.xcodeproj \
+            -project AutoRefresh/AutoRefresh.xcodeproj \
             -scheme AutoRefresh \
             -configuration Release \
             -destination "generic/platform=iOS" \
-            -archivePath "${{ runner.temp }}/AutoRefresh.xcarchive" \
+            -archivePath "${{ env.ARCHIVE_PATH }}" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -53,43 +51,46 @@ jobs:
             ONLY_ACTIVE_ARCH=NO \
             | xcpretty
 
-      # ── 6. Debug: show what the archive actually contains ─────────────────
-      - name: List archive contents
-        run: find "${{ runner.temp }}/AutoRefresh.xcarchive" -maxdepth 5 | sort
+      # ── 5. Verify archive exists ─────────────────────────────────────────────
+      - name: Verify archive & list contents
+        run: |
+          echo "=== Archive root ==="
+          ls -la "${{ env.ARCHIVE_PATH }}" || { echo "ARCHIVE NOT FOUND"; exit 1; }
+          echo ""
+          echo "=== Full tree (depth 6) ==="
+          find "${{ env.ARCHIVE_PATH }}" -maxdepth 6 | sort
 
-      # ── 7. Package .app → .ipa ─────────────────────────────────────────────
-      # Locate the .app dynamically — its path inside the xcarchive differs
-      # when code signing is disabled (no "Applications" subfolder guarantee).
+      # ── 6. Package .ipa ──────────────────────────────────────────────────────
       - name: Package IPA (unsigned)
         run: |
-          ARCHIVE="${{ runner.temp }}/AutoRefresh.xcarchive"
-          PAYLOAD_DIR="${{ runner.temp }}/Payload"
+          ARCHIVE="${{ env.ARCHIVE_PATH }}"
+          IPA_DIR="${{ env.IPA_DIR }}"
 
-          # Find the .app bundle anywhere inside the archive
-          APP_PATH=$(find "$ARCHIVE" -name "*.app" -maxdepth 6 | head -n 1)
+          # Locate .app wherever Xcode put it inside the archive
+          APP_PATH=$(find "$ARCHIVE" -name "*.app" -maxdepth 8 | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "ERROR: No .app found inside xcarchive"
-            find "$ARCHIVE" | sort
+            echo "ERROR: No .app found in archive"
             exit 1
           fi
-          echo "Found app at: $APP_PATH"
+          echo "App bundle: $APP_PATH"
 
-          mkdir -p "$PAYLOAD_DIR"
-          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
+          mkdir -p "$IPA_DIR/Payload"
+          cp -R "$APP_PATH" "$IPA_DIR/Payload/"
 
-          cd "${{ runner.temp }}"
+          cd "$IPA_DIR"
           zip -r AutoRefresh.ipa Payload/
-          echo "IPA size: $(du -sh AutoRefresh.ipa | cut -f1)"
+          echo "IPA: $(du -sh AutoRefresh.ipa | cut -f1)"
+          ls -lh AutoRefresh.ipa
 
-      # ── 7. Upload IPA as artifact ──────────────────────────────────────────
+      # ── 7. Upload artifact ───────────────────────────────────────────────────
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: AutoRefresh-unsigned
-          path: ${{ runner.temp }}/AutoRefresh.ipa
+          path: ${{ env.IPA_DIR }}/AutoRefresh.ipa
           retention-days: 30
 
-      # ── 8. Create/update GitHub Release on main pushes ────────────────────
+      # ── 8. Create GitHub Release ─────────────────────────────────────────────
       - name: Create Release
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: softprops/action-gh-release@v2
@@ -97,17 +98,16 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: "AutoRefresh v1.0 (build ${{ github.run_number }})"
           body: |
-            ## AutoRefresh IPA — unsigned build
+            ## AutoRefresh IPA — unsigned build ${{ github.run_number }}
 
-            **Install via SideStore:**
-            1. Download `AutoRefresh.ipa` from Assets below
-            2. In SideStore → + → select the .ipa
-            3. SideStore signs and installs it with your Apple ID
+            ### Install via SideStore
+            1. Download `AutoRefresh.ipa` from **Assets** below
+            2. SideStore → **+** → select the `.ipa` → Install
+            3. Open AutoRefresh once → allow notifications
+            4. Build the shortcut per [`SHORTCUT_BUILD_GUIDE.md`](https://github.com/vizhnudotexe/openrefresh/blob/main/AutoRefresh/SHORTCUT_BUILD_GUIDE.md)
 
-            **Then:** Open the app once, allow notifications, build the Shortcut per README.
-
-            Commit: ${{ github.sha }}
-          files: ${{ runner.temp }}/AutoRefresh.ipa
+            Commit: `${{ github.sha }}`
+          files: ${{ env.IPA_DIR }}/AutoRefresh.ipa
           draft: false
           prerelease: false
         env:
