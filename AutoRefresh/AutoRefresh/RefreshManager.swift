@@ -1,6 +1,8 @@
 import Foundation
+import UIKit
 import BackgroundTasks
 import Network
+import UserNotifications
 
 // MARK: - RefreshManager
 // Core engine: decides when to refresh and drives SideStore via Shortcuts URL scheme.
@@ -77,9 +79,6 @@ final class RefreshManager {
         request.requiresExternalPower = true
         request.requiresNetworkConnectivity = true
         // Earliest time: respect the charging threshold (minimum minutes plugged in)
-        // We can't truly detect "plugged in for X minutes" in BGTask, but
-        // setting earliestBeginDate to a future point ensures the device has
-        // had time to stabilize on the charger.
         request.earliestBeginDate = Date(timeIntervalSinceNow: Double(chargingMinThreshold) * 60.0)
 
         do {
@@ -90,7 +89,6 @@ final class RefreshManager {
             case .notPermitted:
                 log("ERROR: Background processing not permitted. Enable in Settings > General > Background App Refresh.")
             case .tooManyPendingTaskRequests:
-                // Already queued — fine
                 log("Task already queued.")
             case .unavailable:
                 log("BGTaskScheduler unavailable on this device/config.")
@@ -98,7 +96,7 @@ final class RefreshManager {
                 log("BGTaskScheduler error: \(err.localizedDescription)")
             }
         } catch {
-            log("Unexpected error scheduling task: \(error)")
+            log("Unexpected error scheduling task: \(error.localizedDescription)")
         }
     }
 
@@ -122,7 +120,7 @@ final class RefreshManager {
             return
         }
 
-        // Step 2: Verify network (belt-and-suspenders, BGTask already requires connectivity)
+        // Step 2: Verify network
         checkNetworkAndRefresh { [weak self] success in
             guard let self = self else { return }
             if success {
@@ -162,22 +160,8 @@ final class RefreshManager {
     }
 
     // MARK: - Trigger SideStore via Shortcuts URL scheme
-    //
-    // Strategy (tried in order):
-    //   A) shortcuts://run-shortcut?name=<shortcut_name>
-    //      → opens Shortcuts app and runs the named shortcut
-    //      → Works in foreground; in background iOS may block openURL
-    //
-    //   B) If A is blocked: post a local notification so the user sees it
-    //      and taps it, which brings app to foreground then triggers A.
-    //
-    // Note: In a BGProcessingTask, UIApplication.shared.open() is not
-    // available. We must use a notification to wake the user or rely on
-    // the system running SideStore's own AppIntent via a different path.
-    // The notification approach is the most reliable no-jailbreak path.
 
     func triggerSideStoreRefresh(completion: @escaping (Bool) -> Void) {
-        // Try direct open first (works if app is active/recently foregrounded)
         let encoded = shortcutName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? shortcutName
         let urlStr  = "shortcuts://run-shortcut?name=\(encoded)"
 
@@ -191,12 +175,11 @@ final class RefreshManager {
                     } else {
                         self.log("openURL returned false. Posting notification fallback.")
                         self.postRefreshNotification()
-                        // Count as partial success — notification will drive user
                         completion(true)
                     }
                 }
             } else {
-                self.log("Cannot open Shortcuts URL. Posting notification.")
+                self.log("Cannot open Shortcuts URL directly. Posting notification.")
                 self.postRefreshNotification()
                 completion(true)
             }
@@ -206,21 +189,21 @@ final class RefreshManager {
     // MARK: - Notification fallback
 
     func postRefreshNotification() {
-        let content         = UNMutableNotificationContent()
-        content.title       = "SideStore Refresh Due"
-        content.body        = "Tap to auto-refresh your sideloaded apps now."
-        content.sound       = .default
+        let content = UNMutableNotificationContent()
+        content.title = "SideStore Refresh Due"
+        content.body = "Tap to auto-refresh your sideloaded apps now."
+        content.sound = UNNotificationSound.default
         content.categoryIdentifier = "SIDESTORE_REFRESH"
 
         let request = UNNotificationRequest(
             identifier: "ar_refresh_\(Date().timeIntervalSince1970)",
             content: content,
-            trigger: nil   // deliver immediately
+            trigger: nil
         )
 
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
-                self.log("Notification error: \(error)")
+                self.log("Notification error: \(error.localizedDescription)")
             }
         }
     }

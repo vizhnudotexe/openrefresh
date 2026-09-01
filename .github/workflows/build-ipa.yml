@@ -7,6 +7,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   ARCHIVE_PATH: ${{ github.workspace }}/build/AutoRefresh.xcarchive
   IPA_DIR:      ${{ github.workspace }}/build/ipa
@@ -32,8 +35,6 @@ jobs:
         run: gem install xcpretty --no-document
 
       # ── 4. Archive ───────────────────────────────────────────────────────────
-      # pipefail ensures xcpretty pipe doesn't hide xcodebuild failures.
-      # Workspace path used for archive so all steps share the same location.
       - name: Archive
         run: |
           set -o pipefail
@@ -66,7 +67,7 @@ jobs:
           ARCHIVE="${{ env.ARCHIVE_PATH }}"
           IPA_DIR="${{ env.IPA_DIR }}"
 
-          # Locate .app wherever Xcode put it inside the archive
+          # Locate .app inside the archive
           APP_PATH=$(find "$ARCHIVE" -name "*.app" -maxdepth 8 | head -n 1)
           if [ -z "$APP_PATH" ]; then
             echo "ERROR: No .app found in archive"
@@ -95,7 +96,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
+          tag_name: v1.0.${{ github.run_number }}
           name: "AutoRefresh v1.0 (build ${{ github.run_number }})"
           body: |
             ## AutoRefresh IPA — unsigned build ${{ github.run_number }}
