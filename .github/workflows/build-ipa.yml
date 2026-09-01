@@ -1,0 +1,101 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:          # manual trigger from GitHub UI
+
+jobs:
+  build:
+    name: Build & Export IPA
+    runs-on: macos-15         # Xcode 16 is pre-installed on macos-15 runners
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Select Xcode version ────────────────────────────────────────────
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+
+      # ── 3. Show available SDKs (debug) ─────────────────────────────────────
+      - name: Show SDK info
+        run: xcodebuild -showsdks
+
+      # ── 4. Resolve dependencies (none right now, future-proof) ────────────
+      - name: Resolve Swift packages
+        working-directory: AutoRefresh
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project AutoRefresh.xcodeproj \
+            -scheme AutoRefresh \
+            -destination "generic/platform=iOS"
+
+      # ── 5. Build & Archive ─────────────────────────────────────────────────
+      # CODE_SIGN_IDENTITY="" + AD_HOC_CODE_SIGNING_ALLOWED=YES produces
+      # an unsigned archive that can be re-signed by SideStore/AltStore.
+      - name: Archive
+        working-directory: AutoRefresh
+        run: |
+          xcodebuild archive \
+            -project AutoRefresh.xcodeproj \
+            -scheme AutoRefresh \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "${{ runner.temp }}/AutoRefresh.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            ONLY_ACTIVE_ARCH=NO \
+            | xcpretty
+
+      # ── 6. Package .app → .ipa ─────────────────────────────────────────────
+      # We skip xcodebuild -exportArchive (requires a signing identity) and
+      # manually zip the .app into the IPA payload structure instead.
+      - name: Package IPA (unsigned)
+        run: |
+          ARCHIVE="${{ runner.temp }}/AutoRefresh.xcarchive"
+          PAYLOAD_DIR="${{ runner.temp }}/Payload"
+          IPA_PATH="${{ runner.temp }}/AutoRefresh.ipa"
+
+          mkdir -p "$PAYLOAD_DIR"
+          cp -R "$ARCHIVE/Products/Applications/AutoRefresh.app" "$PAYLOAD_DIR/"
+          cd "${{ runner.temp }}"
+          zip -r AutoRefresh.ipa Payload/
+          echo "IPA size: $(du -sh AutoRefresh.ipa | cut -f1)"
+
+      # ── 7. Upload IPA as artifact ──────────────────────────────────────────
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoRefresh-unsigned
+          path: ${{ runner.temp }}/AutoRefresh.ipa
+          retention-days: 30
+
+      # ── 8. Create/update GitHub Release on main pushes ────────────────────
+      - name: Create Release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "AutoRefresh v1.0 (build ${{ github.run_number }})"
+          body: |
+            ## AutoRefresh IPA — unsigned build
+
+            **Install via SideStore:**
+            1. Download `AutoRefresh.ipa` from Assets below
+            2. In SideStore → + → select the .ipa
+            3. SideStore signs and installs it with your Apple ID
+
+            **Then:** Open the app once, allow notifications, build the Shortcut per README.
+
+            Commit: ${{ github.sha }}
+          files: ${{ runner.temp }}/AutoRefresh.ipa
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
