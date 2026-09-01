@@ -53,17 +53,30 @@ jobs:
             ONLY_ACTIVE_ARCH=NO \
             | xcpretty
 
-      # ── 6. Package .app → .ipa ─────────────────────────────────────────────
-      # We skip xcodebuild -exportArchive (requires a signing identity) and
-      # manually zip the .app into the IPA payload structure instead.
+      # ── 6. Debug: show what the archive actually contains ─────────────────
+      - name: List archive contents
+        run: find "${{ runner.temp }}/AutoRefresh.xcarchive" -maxdepth 5 | sort
+
+      # ── 7. Package .app → .ipa ─────────────────────────────────────────────
+      # Locate the .app dynamically — its path inside the xcarchive differs
+      # when code signing is disabled (no "Applications" subfolder guarantee).
       - name: Package IPA (unsigned)
         run: |
           ARCHIVE="${{ runner.temp }}/AutoRefresh.xcarchive"
           PAYLOAD_DIR="${{ runner.temp }}/Payload"
-          IPA_PATH="${{ runner.temp }}/AutoRefresh.ipa"
+
+          # Find the .app bundle anywhere inside the archive
+          APP_PATH=$(find "$ARCHIVE" -name "*.app" -maxdepth 6 | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app found inside xcarchive"
+            find "$ARCHIVE" | sort
+            exit 1
+          fi
+          echo "Found app at: $APP_PATH"
 
           mkdir -p "$PAYLOAD_DIR"
-          cp -R "$ARCHIVE/Products/Applications/AutoRefresh.app" "$PAYLOAD_DIR/"
+          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
+
           cd "${{ runner.temp }}"
           zip -r AutoRefresh.ipa Payload/
           echo "IPA size: $(du -sh AutoRefresh.ipa | cut -f1)"
